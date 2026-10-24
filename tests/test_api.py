@@ -35,15 +35,19 @@ def test_normalization_partial_and_cache():
         return httpx.Response(200, json={"results": [VN], "more": True})
 
     with client(handler) as c:
-        response = c.get("/v1/search?q=Ever17", headers=HEADERS)
+        response = c.get("/v1/search?q=Ever17&provider=vndb", headers=HEADERS)
         data = response.json()
         assert response.status_code == 200
-        assert data["partial"] is True
+        assert data["partial"] is False
         assert data["results"][0]["id"] == "vndb:visual_novel:v17"
         assert data["results"][0]["release_date"] == "2002"
         assert data["results"][0]["image_url"] is None
         assert data["more"] is True
-        assert c.get("/v1/search?q=Ever17", headers=HEADERS).status_code == 200
+        cached = c.get("/v1/search?q=Ever17&provider=vndb", headers=HEADERS)
+        assert cached.status_code == 200
+        assert (
+            cached.json()["results"][0]["source"]["fetched_at"] == data["results"][0]["source"]["fetched_at"]
+        )
         assert len(calls) == 1
         assert response.headers["X-Request-ID"]
 

@@ -16,3 +16,23 @@ jobs:
       - run: ruff format --check .
       - run: pytest -q
       - run: docker build -t folio-metadata-api:test .
+      - name: Check container startup and authentication
+        run: |
+          docker run -d --name metadata-test --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges:true -e METADATA_API_KEY=ci-only-placeholder-key-32-characters folio-metadata-api:test
+          python - <<'PY'
+          import subprocess, time
+          for attempt in range(20):
+              result = subprocess.run(['docker', 'exec', 'metadata-test', 'python', '-c',
+                  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"], capture_output=True)
+              if result.returncode == 0:
+                  break
+              time.sleep(1)
+          else:
+              raise SystemExit('Container did not become healthy')
+          PY
+          docker exec metadata-test python -c "import json,urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/v1/providers',headers={'Authorization':'Bearer ci-only-placeholder-key-32-characters'}); assert len(json.load(urllib.request.urlopen(req))) == 8"
+      - name: Container logs and cleanup
+        if: always()
+        run: |
+          docker logs metadata-test || true
+          docker rm -f metadata-test || true
