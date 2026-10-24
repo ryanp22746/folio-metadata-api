@@ -7,6 +7,14 @@ services:
     environment:
       METADATA_API_KEY: ${METADATA_API_KEY:?Set a random API key of at least 32 characters}
       TMDB_READ_TOKEN: ${TMDB_READ_TOKEN:-}
+      IGDB_CLIENT_ID: ${IGDB_CLIENT_ID:-}
+      IGDB_CLIENT_SECRET: ${IGDB_CLIENT_SECRET:-}
+      OMDB_API_KEY: ${OMDB_API_KEY:-}
+      ANILIST_ENABLED: ${ANILIST_ENABLED:-false}
+      MUSICBRAINZ_CONTACT: ${MUSICBRAINZ_CONTACT:-https://github.com/ryanp22746/folio-metadata-api}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-900}
+      CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-256}
+      PROVIDER_TIMEOUT_SECONDS: ${PROVIDER_TIMEOUT_SECONDS:-12}
     read_only: true
     tmpfs:
       - /tmp

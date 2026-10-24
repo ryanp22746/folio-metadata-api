@@ -1,73 +1,78 @@
 # Folio Metadata API
 
-Independent metadata service for Folio. Deploy separately from the webapp on a standard Docker host. The webapp owns users, library entries, progress, and personal edits; this service owns provider integration and normalized metadata.
+A standalone metadata service for Folio, deployable on a Docker host independently of the webapp. Version 0.2 supports eight providers. The webapp retains ownership of accounts, library entries, personal edits and progress.
 
-## Current scope
+## Integrations
 
-- VNDB visual novel search and detail lookup, no provider key required.
-- TMDB movie and TV search/detail, enabled with a TMDB API Read Access Token.
-- Stable provider-qualified IDs, source URLs, retrieval timestamps, optional fields, and IMDb IDs when supplied by TMDB.
-- Bearer authentication, input validation, bounded 15-minute in-memory cache, provider pacing/backoff, request limits, timeouts, partial search results, and generated OpenAPI docs.
-- No scraping, automatic title-based merging, user database, or direct IMDb integration.
+| Provider | Capability | Configuration |
+| --- | --- | --- |
+| TMDB | Movie and TV search/detail | `TMDB_READ_TOKEN` |
+| VNDB | Visual novel search/detail | None |
+| MangaUpdates | Manga/manhwa/manhua search/detail | None; source attribution required |
+| MusicBrainz | Music release-group and recording search/detail | Set an operator contact in `MUSICBRAINZ_CONTACT` |
+| IGDB | Game search/detail, platform data and ratings | `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`; access token renews automatically |
+| OMDb | Movie/TV ratings by IMDb ID | `OMDB_API_KEY` |
+| Steam | Review summary by Steam app ID | No key; uses current `IUserReviewsService/GetAppReviews` |
+| AniList | Anime/manga search/detail | Implemented but **disabled by default**; resolve permitted use before enabling |
 
-## Local development
+AniList's [current terms](https://docs.anilist.co/guide/terms-of-use) restrict competing anime/manga list or tracker services, including use of media metadata. Folio may fall within this restriction. Do not treat setting `ANILIST_ENABLED=true` as permission. Confirm an allowed use or obtain an appropriate arrangement first. Until then, anime discovery through this adapter is unavailable; MangaUpdates supplies manga discovery.
 
-Use Python 3.12 (3.10+ supported).
+See [provider setup and limitations](docs/providers.md) for credentials, usage obligations, source semantics, and known constraints. Credentials are configured on the server, never accepted from the browser or committed to Git.
+
+## Run locally
+
+Use Python 3.12 (3.10+ supported). PowerShell:
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements-dev.txt
 $env:METADATA_API_KEY = python -c "import secrets; print(secrets.token_urlsafe(32))"
-# Optional: set TMDB_READ_TOKEN through your local secret manager or shell.
 .\.venv\Scripts\python -m uvicorn folio_metadata.app:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
-Open http://127.0.0.1:8000/docs for the interactive API reference; use Authorize with your service key. OpenAPI is also available at `/openapi.json`. Local uvicorn does not automatically load `.env`; Compose does.
+Set provider environment variables as needed. Local uvicorn does not load `.env` automatically; Docker Compose does. Open [interactive documentation](http://127.0.0.1:8000/docs), click Authorize, and enter the service key. The generated schema is at `/openapi.json`.
 
-```powershell
-$headers = @{ Authorization = "Bearer $env:METADATA_API_KEY" }
-Invoke-RestMethod 'http://127.0.0.1:8000/v1/search?q=Ever17&kind=visual_novel' -Headers $headers
-Invoke-RestMethod 'http://127.0.0.1:8000/v1/items/vndb/visual_novel/v17' -Headers $headers
-```
+## API contract
 
-## HTTP contract
+All `/v1` routes require `Authorization: Bearer <METADATA_API_KEY>`.
 
 | Route | Purpose |
 | --- | --- |
-| `GET /healthz` | Process health; does not check third-party availability |
-| `GET /v1/search?q=...&kind=movie&page=1` | Search; optional kind is movie, tv, or visual_novel |
-| `GET /v1/items/{provider}/{kind}/{identifier}` | Metadata for an explicitly selected source item |
+| `GET /healthz` | Process health, independent of third-party outages |
+| `GET /v1/providers` | Configuration readiness, supported media kinds and capabilities |
+| `GET /v1/search?q=...&kind=manga&provider=mangaupdates&page=1` | Search; kind/provider filters optional |
+| `GET /v1/items/{provider}/{kind}/{identifier}` | Full metadata for a selected source record |
+| `GET /v1/items/{provider}/{kind}/{identifier}?enrich=true` | Detail plus optional ID-based ratings enrichment |
+| `GET /v1/enrich/omdb/tt0076759` | OMDb ratings for a known IMDb title |
+| `GET /v1/enrich/steam/620` | Steam aggregate review counts for a known app |
 
-Search returns `results`, `providers`, `partial`, `page`, and `more`. Without a kind, each applicable source is queried; results remain grouped, with up to 20 per media kind. Pagination is provider-local, not a globally ranked index. A provider outage leaves other results usable and marks the response partial. If all requested providers fail or are unconfigured, the response is 503. An empty successful search is 200. Invalid input is 422; invalid credentials 401; missing details 404; service quota exhaustion 429. Errors use FastAPI's `detail` envelope. Every response has a generated `X-Request-ID`.
+Supported kinds: `movie`, `tv`, `visual_novel`, `anime`, `manga`, `game`, `album`, `track`. OMDb and Steam are enrichment-only providers, so passing either as a search provider returns 422.
 
-IDs such as `tmdb:movie:11` and `vndb:visual_novel:v17` identify source records, not universal works. Do not automatically merge by title: remakes, adaptations, editions, and identical names exist. Fetch detail after the user chooses a candidate; store the source ID and timestamp alongside imported fields. Retain personal edits in the webapp and only replace fields the user opts to refresh. Search summaries may omit genres or external IDs available on detail.
+`album` maps to MusicBrainz release groups (including albums, EPs and singles); `track` maps to recordings, not a specific track on a release. `manga` includes regional comic formats such as manhwa, retained in the `format` field. Prose novels and audio records are excluded from MangaUpdates discovery.
 
-Dates preserve provider precision (`2002`, `2002-08`, full dates, or VNDB's `TBA`). Descriptions are untrusted text; VNDB includes markup and is labeled accordingly. Escape text in the frontend, and sanitize any markup renderer. Image content flags are passed through for the client to apply its display preferences. This API is not a content moderation service.
+Search returns `results`, `providers`, `partial`, `page`, and `more`. Each status includes provider and media kind; one provider may have multiple entries. Results are grouped in stable provider/kind order, up to 20 per provider/kind. Pagination remains provider-local, not globally ranked. IGDB's `more` is conservative when a full page is returned; the next page may be empty. Use kind/provider filters to avoid unnecessary upstream work.
 
-## Deploy on Adam's server
+Unavailable or unconfigured providers leave other results usable and mark the response partial. If every requested target fails, the result is 503. Empty successful searches return 200. Missing records return 404, unsupported IDs/combinations 422, bad credentials 401, and the service request quota 429. Error bodies use FastAPI's `detail` envelope. Each response includes a generated `X-Request-ID`.
 
-1. Clone the private repository on a Linux host with Docker Compose.
-2. Copy `.env.example` to `.env`; set `METADATA_API_KEY` to a random secret of at least 32 characters and optionally set `TMDB_READ_TOKEN`. Keep `.env` outside Git and restrict its permissions (`chmod 600 .env`).
-3. Run `docker compose up -d --build`. Check `docker compose ps` and `curl http://127.0.0.1:8000/healthz`.
-4. Route a dedicated HTTPS hostname through the host's reverse proxy to `127.0.0.1:8000`. Configure TLS, request/body limits, connection limits, and perimeter rate limits there. Leave the container bound to loopback. If the proxy is in Docker, connect both services to a private Docker network instead of publishing a public port.
-5. Set the API base URL and service key in the **Folio server's** secret configuration. Make calls from the webapp backend. Never embed this shared key or provider credentials in browser JavaScript. Browser CORS is intentionally not enabled.
-6. Run authenticated search and detail smoke checks. Movie/TV checks require a valid TMDB token. Confirm attribution in the webapp before launch.
+`/v1/providers` reports readiness from local configuration; it does not probe upstream availability or validate credentials.
 
-Run **one replica and one worker**: cache, request quota (60 authenticated calls/minute), and upstream cooldown state are process-local. VNDB calls are spaced at least two seconds apart; cache misses wait briefly for pacing, while long upstream cooldowns fail fast as provider unavailable. Upstream 429 pauses that provider for at least 60 seconds, honoring numeric Retry-After up to one hour. No automatic retries amplify outages. VNDB also has execution-time quotas, so pacing cannot guarantee absence of 429s. Restarts clear these controls and cache. Add Redis-backed cache and distributed quotas before adding replicas or high-volume use. Provider calls time out after eight seconds per network operation; configure an overall reverse proxy deadline as well.
+### Safe enrichment and attribution
 
-Container runs without root, with a read-only filesystem and dropped capabilities. No persistent data volume is required. Keep the service key only between trusted backends; public multi-tenant access needs individual credentials and per-client quotas. Log status/request IDs, not tokens or search strings. Uvicorn access logs are disabled in the container to avoid logging queries. Configure application log collection as needed. Public schema/docs contain no secrets; restrict them at the proxy if desired.
+Items retain provider-qualified IDs, canonical source URLs, and timestamps of the upstream fetch (cache hits preserve the original timestamp). Each rating retains its label, original value/scale, and source. Scores from different populations are not averaged.
 
-For updates, pull a reviewed commit and rebuild. Record the deployed commit; roll back by deploying the previous commit and rebuilding. Rotate keys by coordinating the API and webapp configuration and restarting. No deployment automation or server access has been assumed.
+With `enrich=true`, TMDB detail uses its known IMDb ID for OMDb. IGDB detail uses an unambiguous Steam app URL supplied by IGDB for Steam review summaries. Missing IDs cause no speculative lookup. Multiple Steam IDs are considered ambiguous. Enrichment outages leave primary metadata intact and appear in `enrichment_status`. Results are kept separately in `enrichments`; personal or primary fields are never overwritten.
 
-## Providers and usage obligations
+Steam summaries cover all languages and purchase types with off-topic activity excluded. Zero reviews yields a null percentage. Individual review text and user identifiers are not returned. OMDb is a separate provider, not direct licensed IMDb access.
 
-- [VNDB Kana API](https://api.vndb.org/kana): free non-commercial API access with rate and execution-time limits. Follow its linked data license; artwork has separate ownership. Broader/commercial use requires reviewing the provider's terms.
-- [TMDB API](https://developer.themoviedb.org/docs/authentication-application): set its API Read Access Token. [Attribution requirements](https://developer.themoviedb.org/docs/faq) include an approved TMDB logo and the notice: “This product uses the TMDB API but is not endorsed or certified by TMDB.” Put these in the webapp About/Credits area. Commercial use requires appropriate provider arrangements.
-- [IMDb official access](https://data.imdb.com/documentation/api-documentation/getting-access/): requires an AWS Data Exchange subscription and credentials. An IMDb ID supplied by TMDB is only an identifier; it does not provide IMDb ratings or licensed IMDb data. Add a dedicated adapter after access is arranged.
+Descriptions are untrusted provider content and labeled `text`, `html`, or `vndb_markup`. Escape plain text and sanitize rich text before rendering. Dates preserve known precision; do not invent January 1 for a year-only date. Images may have separate rights and content restrictions.
 
-No provider content license is granted by this repository. Keep source attribution when displaying imported metadata and verify retention/redistribution rights for your use case.
+## Deploy later
 
-## Development
+Follow [the server runbook](docs/deployment.md). It covers environment configuration, Docker Compose, TLS/reverse proxy, secrets, checks, updates and rollback. The service runs as a non-root user with a read-only filesystem, no database, and no required persistent volumes.
+
+One process / one replica is currently supported. Cache and provider quota state are in memory. Add shared cache and distributed rate limiting before horizontal scaling. This is suitable for an initial low-traffic deployment; credentials and live provider checks are still required before launch.
+
+## Validation
 
 ```sh
 python -m pytest -q
@@ -75,5 +80,25 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-Tests use mocked provider responses and require no external credentials. CI also builds the Docker image. Dependency versions are pinned in requirements files; Dependabot proposes updates weekly. Add providers behind `Gateway` with mapping tests and explicit ID/terms handling; preserve the v1 response contract. Breaking changes belong under `/v2`.
+Tests use deterministic HTTP fixtures and include authentication, provider mapping, pagination, OAuth refresh, malformed responses, partial results, cache bounds, pacing and deadlines. CI also builds and starts the hardened container.
+
+Opt-in public live checks:
+
+```sh
+python -m scripts.smoke
+python -m scripts.smoke --provider tmdb --provider igdb --provider omdb
+```
+
+The second command requires credentials in the environment. AniList is tested with mocks by default; a live check requires explicitly enabling permitted use and selecting `--provider anilist`. Live checks can fail during provider outages and are intentionally separate from CI. They print only provider names and exception types, never credential-bearing URLs.
+
+## Structure
+
+- `adapters/`: provider queries and normalization.
+- `transport.py`: fixed upstream origins, bounded responses/cache, pacing, cooldowns, OAuth and deadlines.
+- `gateway.py`: capability registry and orchestration.
+- `models.py`: typed public contract.
+- `app.py`: authenticated versioned routes.
+- `config.py`: validated environment configuration.
+
+Add providers through an adapter and registry entry with mapping/failure tests. Preserve the v1 contract; breaking changes belong in a new version. Dependency updates are proposed by Dependabot. No webapp integration or deployment to a remote server is performed by this repository.
 

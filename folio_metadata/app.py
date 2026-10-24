@@ -1,44 +1,62 @@
+import asyncio
 import logging
-import os
-import re
 import secrets
 import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import ValidationError
 
-from .models import Kind, Media, Provider, ProviderStatus, SearchResponse
-from .providers import Gateway, NotConfigured, ProviderError
+from .config import Settings
+from .gateway import Gateway
+from .models import Enrichment, Kind, Media, Provider, ProviderInfo, ProviderStatus, SearchResponse
+from .transport import Disabled, NotConfigured, ProviderError
 
-log = logging.getLogger("folio")
+log = logging.getLogger("uvicorn.error")
 security = HTTPBearer(auto_error=False)
+UPSTREAM_ERRORS = (
+    ProviderError,
+    KeyError,
+    TypeError,
+    ValueError,
+    AttributeError,
+    OverflowError,
+    TimeoutError,
+    asyncio.TimeoutError,
+)
 
 
-def create_app(api_key=None, tmdb_token=None, transport=None):
-    key = api_key if api_key is not None else os.getenv("METADATA_API_KEY", "")
-    token = tmdb_token if tmdb_token is not None else os.getenv("TMDB_READ_TOKEN", "")
+def create_app(api_key=None, tmdb_token=None, transport=None, *, settings=None):
+    config = settings or Settings.from_env()
+    updates = {}
+    if api_key is not None:
+        updates["api_key"] = api_key
+    if tmdb_token is not None:
+        updates["tmdb_token"] = tmdb_token
+    config = Settings(**(config.model_dump() | updates))
+    key = config.api_key.get_secret_value()
 
     @asynccontextmanager
     async def lifespan(app):
         if len(key) < 32:
             raise RuntimeError("METADATA_API_KEY must contain at least 32 characters")
+        # httpx INFO request logs include OMDb's required query-string credential.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
         async with httpx.AsyncClient(
             timeout=8,
             follow_redirects=False,
             transport=transport,
-            limits=httpx.Limits(max_connections=10),
-            headers={"User-Agent": "FolioMetadata/0.1"},
+            limits=httpx.Limits(max_connections=16),
+            headers={"User-Agent": "FolioMetadata/0.2"},
         ) as client:
-            app.state.gateway = Gateway(client, token)
+            app.state.gateway = Gateway(client, config)
             yield
 
-    app = FastAPI(title="Folio Metadata API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Folio Metadata API", version="0.2.0", lifespan=lifespan)
     requests = deque()
 
     @app.middleware("http")
@@ -71,69 +89,111 @@ def create_app(api_key=None, tmdb_token=None, transport=None):
     async def health():
         return {"status": "ok"}
 
+    @app.get("/v1/providers", response_model=list[ProviderInfo], dependencies=[Depends(authorize)])
+    async def providers(request: Request):
+        return request.app.state.gateway.catalog()
+
     @app.get("/v1/search", response_model=SearchResponse, dependencies=[Depends(authorize)])
     async def search(
         request: Request,
         q: str = Query(min_length=1, max_length=200),
         kind: Kind | None = None,
         page: int = Query(default=1, ge=1, le=100),
+        provider: Provider | None = None,
     ):
-        if not q.strip():
-            raise HTTPException(422, "Query must not be blank")
-        targets = [("vndb", "visual_novel"), ("tmdb", "movie"), ("tmdb", "tv")]
-        targets = [(p, k) for p, k in targets if kind is None or k == kind]
+        if not q.strip() or any(ord(c) < 32 for c in q):
+            raise HTTPException(422, "Query must contain text and no control characters")
+        gateway = request.app.state.gateway
+        targets = gateway.targets(kind, provider)
+        if not targets:
+            raise HTTPException(422, "Provider does not support search for this kind")
 
-        async def run(provider, selected_kind):
+        async def run(name, selected_kind):
+            status = "ok"
+            items, more = [], False
             try:
-                # Movie and TV share a rate budget; combine them sequentially below.
-                result, more = await request.app.state.gateway.search(
-                    provider, q.strip(), selected_kind, page
-                )
-                return result, more, "ok"
+                items, more = await gateway.search(name, q.strip(), selected_kind, page)
+            except Disabled:
+                status = "disabled"
             except NotConfigured:
-                return [], False, "not_configured"
-            except (ProviderError, KeyError, TypeError, ValueError, AttributeError, ValidationError):
-                return [], False, "unavailable"
+                status = "not_configured"
+            except UPSTREAM_ERRORS:
+                status = "unavailable"
+            return items, more, ProviderStatus(provider=name, kind=selected_kind, status=status)
 
-        results, statuses, more = [], {}, False
-        for provider, selected_kind in targets:
-            items, has_more, status = await run(provider, selected_kind)
-            results.extend(items)
-            more = more or has_more
-            if statuses.get(provider) != "unavailable":
-                statuses[provider] = status
-        provider_states = [ProviderStatus(provider=p, status=s) for p, s in statuses.items()]
-        if not results and all(s != "ok" for s in statuses.values()):
+        # Independent providers run concurrently; transport locks enforce each provider's budget.
+        outcomes = await asyncio.gather(*(run(p, k) for p, k in targets))
+        states = [result[2] for result in outcomes]
+        if all(state.status != "ok" for state in states):
             raise HTTPException(
                 503,
-                {
-                    "message": "No requested provider available",
-                    "providers": [s.model_dump() for s in provider_states],
-                },
+                {"message": "No requested provider available", "providers": [s.model_dump() for s in states]},
             )
         return SearchResponse(
-            results=results,
-            providers=provider_states,
-            partial=any(s != "ok" for s in statuses.values()),
+            results=[item for result in outcomes for item in result[0]],
+            providers=states,
+            partial=any(s.status != "ok" for s in states),
             page=page,
-            more=more,
+            more=any(result[1] for result in outcomes),
         )
+
+    async def load_enrichment(gateway, provider, identifier):
+        try:
+            result = await gateway.enrich(provider, identifier)
+            return result, ProviderStatus(provider=provider, status="ok" if result else "not_found")
+        except Disabled:
+            return None, ProviderStatus(provider=provider, status="disabled")
+        except NotConfigured:
+            return None, ProviderStatus(provider=provider, status="not_configured")
+        except UPSTREAM_ERRORS:
+            return None, ProviderStatus(provider=provider, status="unavailable")
+
+    @app.get(
+        "/v1/enrich/{provider}/{identifier}", response_model=Enrichment, dependencies=[Depends(authorize)]
+    )
+    async def enrich(request: Request, provider: Literal["omdb", "steam"], identifier: str):
+        gateway = request.app.state.gateway
+        kind = "movie" if provider == "omdb" else "game"
+        if not gateway.valid(provider, kind, identifier, enrichment=True):
+            raise HTTPException(422, "Invalid enrichment identifier")
+        result, status = await load_enrichment(gateway, provider, identifier)
+        if result is None:
+            raise HTTPException(404 if status.status == "not_found" else 503, status.model_dump())
+        return result
 
     @app.get(
         "/v1/items/{provider}/{kind}/{identifier}", response_model=Media, dependencies=[Depends(authorize)]
     )
-    async def detail(request: Request, provider: Provider, kind: Kind, identifier: str):
-        valid = (
-            provider == "vndb" and kind == "visual_novel" and re.fullmatch(r"v[1-9][0-9]{0,9}", identifier)
-        ) or (provider == "tmdb" and kind in ("movie", "tv") and re.fullmatch(r"[1-9][0-9]{0,9}", identifier))
-        if not valid:
+    async def detail(request: Request, provider: Provider, kind: Kind, identifier: str, enrich: bool = False):
+        gateway = request.app.state.gateway
+        if not gateway.valid(provider, kind, identifier):
             raise HTTPException(422, "Invalid provider, kind or identifier combination")
         try:
-            result = await request.app.state.gateway.detail(provider, kind, identifier)
-        except (ProviderError, KeyError, TypeError, ValueError, AttributeError, ValidationError):
-            raise HTTPException(503, "Provider unavailable") from None
+            result = await gateway.detail(provider, kind, identifier)
+        except Disabled:
+            raise HTTPException(503, {"provider": provider, "status": "disabled"}) from None
+        except NotConfigured:
+            raise HTTPException(503, {"provider": provider, "status": "not_configured"}) from None
+        except UPSTREAM_ERRORS:
+            raise HTTPException(503, {"provider": provider, "status": "unavailable"}) from None
         if result is None:
             raise HTTPException(404, "Item not found")
+        # A provider must return the exact selected record, never a silent alternate match.
+        if result.source.id.lower() != identifier.lower() or result.kind != kind:
+            raise HTTPException(503, "Provider returned a mismatched record")
+        if enrich:
+            target = None
+            if provider == "tmdb" and result.external_ids.get("imdb"):
+                target = ("omdb", result.external_ids["imdb"])
+            elif provider == "igdb" and result.external_ids.get("steam"):
+                target = ("steam", result.external_ids["steam"])
+            if target:
+                name, external_id = target
+                if gateway.valid(name, kind, external_id, enrichment=True):
+                    extra, state = await load_enrichment(gateway, name, external_id)
+                    result.enrichment_status.append(state)
+                    if extra:
+                        result.enrichments.append(extra)
         return result
 
     return app
