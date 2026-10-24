@@ -1,5 +1,5 @@
 from ..models import Media
-from .common import source
+from .common import rating, source
 
 
 class TMDB:
@@ -22,7 +22,7 @@ class TMDB:
         doc = await self.http.request(
             "tmdb",
             f"/{kind}/{identifier}",
-            params={"append_to_response": "external_ids", "language": "en-US"},
+            params={"append_to_response": "external_ids,credits", "language": "en-US"},
         )
         return normalize_tmdb(doc.data, kind, doc.fetched_at) if doc else None
 
@@ -54,7 +54,7 @@ class VNDB:
         return normalize_vn(doc.data["results"][0], doc.fetched_at) if doc and doc.data["results"] else None
 
 
-VN_FIELDS = "title,alttitle,description,released,image.url,image.sexual,image.violence"
+VN_FIELDS = "title,alttitle,description,released,image.url,image.sexual,image.violence,rating,votecount,developers.name,length_minutes"
 
 
 def normalize_vn(data, fetched_at):
@@ -63,6 +63,15 @@ def normalize_vn(data, fetched_at):
     return Media(
         id=f"vndb:visual_novel:{identifier}",
         kind="visual_novel",
+        rating_count=data.get("votecount"),
+        ratings=rating(
+            "VNDB Bayesian",
+            data.get("rating"),
+            100,
+            source("vndb", identifier, f"https://vndb.org/{identifier}", fetched_at),
+        ),
+        creators=[x["name"] for x in data.get("developers", [])],
+        facts={"Typical length": f"{data['length_minutes']} minutes"} if data.get("length_minutes") else {},
         title=data["title"],
         original_title=data.get("alttitle"),
         description=data.get("description"),
@@ -82,7 +91,34 @@ def normalize_tmdb(data, kind, fetched_at):
     imdb = (data.get("external_ids") or {}).get("imdb_id") or data.get("imdb_id")
     if imdb:
         ids["imdb"] = imdb
+    origin = source("tmdb", identifier, f"https://www.themoviedb.org/{kind}/{identifier}", fetched_at)
     return Media(
+        facts={
+            label: str(data[key]) + suffix
+            for key, label, suffix in [
+                ("runtime", "Runtime", " minutes"),
+                ("number_of_seasons", "Seasons", ""),
+                ("number_of_episodes", "Episodes", ""),
+                ("status", "Release status", ""),
+                ("original_language", "Original language", ""),
+            ]
+            if data.get(key)
+        },
+        creators=list(
+            dict.fromkeys(
+                [x["name"] for x in data.get("created_by", [])]
+                + [
+                    x["name"]
+                    for x in (data.get("credits") or {}).get("crew", [])
+                    if x.get("job") == "Director"
+                ]
+            )
+        ),
+        popularity=data.get("popularity"),
+        rating_count=data.get("vote_count"),
+        ratings=rating(
+            "TMDB users", data.get("vote_average") if data.get("vote_count") else None, 10, origin
+        ),
         id=f"tmdb:{kind}:{identifier}",
         kind=kind,
         title=data["title"] if kind == "movie" else data["name"],

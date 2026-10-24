@@ -1,6 +1,6 @@
 # Folio Metadata API
 
-A standalone metadata service for Folio, deployable on a Docker host independently of the webapp. Version 0.2 supports eight providers. The webapp retains ownership of accounts, library entries, personal edits and progress.
+A standalone metadata service for Folio, deployable on a Docker host independently of the webapp. Version 0.2 supports nine providers. The webapp retains ownership of accounts, library entries, personal edits and progress.
 
 ## Integrations
 
@@ -9,6 +9,7 @@ A standalone metadata service for Folio, deployable on a Docker host independent
 | TMDB | Movie and TV search/detail | `TMDB_READ_TOKEN` |
 | VNDB | Visual novel search/detail | None |
 | MangaUpdates | Manga/manhwa/manhua search/detail | None; source attribution required |
+| Apple catalog | Supplementary US album search/detail | No key; one page of 20 results |
 | MusicBrainz | Music release-group and recording search/detail | Set an operator contact in `MUSICBRAINZ_CONTACT` |
 | IGDB | Game search/detail, platform data and ratings | `IGDB_CLIENT_ID`, `IGDB_CLIENT_SECRET`; access token renews automatically |
 | OMDb | Movie/TV ratings by IMDb ID | `OMDB_API_KEY` |

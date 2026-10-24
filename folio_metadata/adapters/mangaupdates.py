@@ -57,6 +57,7 @@ def normalize(data, fetched_at):
     return Media(
         id=f"mangaupdates:manga:{identifier}",
         kind="manga",
+        rating_count=data.get("rating_votes"),
         title=data["title"],
         description=data.get("description"),
         description_format="html",

@@ -29,7 +29,7 @@ def no_network(request):
 def test_catalog_and_missing_configuration():
     with client(no_network) as c:
         catalog = c.get("/v1/providers", headers=AUTH)
-        assert len(catalog.json()) == 8
+        assert len(catalog.json()) == 9
         states = {x["provider"]: x["status"] for x in catalog.json()}
         assert states["anilist"] == "disabled"
         assert states["igdb"] == states["omdb"] == states["tmdb"] == "not_configured"
@@ -144,7 +144,7 @@ def test_musicbrainz_entities_pagination_and_identification():
         if "query" in request.url.params:
             assert request.url.params["offset"] == "20" and request.url.params["dismax"] == "true"
             return httpx.Response(200, json={kind + "s": [record], "count": 41})
-        assert request.url.params["inc"] == "artist-credits+genres"
+        assert "ratings" in request.url.params["inc"] and "artist-credits" in request.url.params["inc"]
         return httpx.Response(200, json=record)
 
     with client(handler, musicbrainz_contact="operator@example.org") as c:
@@ -351,3 +351,120 @@ def test_environment_config_does_not_leak_secrets(monkeypatch):
     assert settings.omdb_api_key.get_secret_value() == "super-secret-omdb-key"
     assert "super-secret-omdb-key" not in repr(settings)
     assert settings.anilist_enabled is False
+
+
+def test_mangaupdates_preserves_popularity_votes():
+    from folio_metadata.adapters.mangaupdates import normalize
+
+    result = normalize({"series_id": 1, "title": "Berserk", "rating_votes": 3731}, "2026-10-24T00:00:00Z")
+    assert result.rating_count == 3731
+
+
+def test_music_covers_and_ratings_use_exact_musicbrainz_ids():
+    from folio_metadata.adapters.musicbrainz import normalize
+
+    album = normalize(
+        {"id": MBID, "title": "Music", "rating": {"value": 4.338, "votes-count": 19}},
+        "album",
+        "2026-10-24T00:00:00Z",
+    )
+    assert album.image_url == f"https://coverartarchive.org/release-group/{MBID}/front-500"
+    assert album.ratings[0].value == "4.3/5"
+    assert album.rating_count == 19
+    track = normalize({"id": MBID, "title": "Recording"}, "track", "2026-10-24T00:00:00Z")
+    assert track.image_url is None
+
+
+def test_music_catalog_hints_are_not_identity_matches():
+    def handler(request):
+        if request.url.host == "itunes.apple.com":
+            return httpx.Response(
+                200, json={"results": [{"collectionName": "Album", "artistName": "Artist"}]}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "release-groups": [
+                    {"id": MBID, "title": "Album", "artist-credit": [{"name": "Artist"}]},
+                    {
+                        "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                        "title": "Album",
+                        "artist-credit": [{"name": "Other Artist"}],
+                    },
+                ],
+                "count": 2,
+            },
+        )
+
+    with client(handler) as c:
+        rows = c.get("/v1/search?q=Album&kind=album", headers=AUTH).json()["results"]
+        assert rows[0]["search_priority"] == 1.1
+        assert rows[1]["search_priority"] is None
+        assert rows[0]["external_ids"] == {"musicbrainz": MBID}
+
+
+def test_apple_album_fallback_survives_musicbrainz_outage():
+    def handler(request):
+        if request.url.host == "musicbrainz.org":
+            return httpx.Response(503)
+        record = {
+            "wrapperType": "collection",
+            "collectionId": 123,
+            "collectionName": "Album",
+            "artistName": "Artist",
+            "collectionViewUrl": "https://music.apple.com/us/album/123",
+            "artworkUrl100": "https://example.com/100x100bb.jpg",
+        }
+        return httpx.Response(200, json={"results": [record]})
+
+    with client(handler) as c:
+        result = c.get("/v1/search?q=Album&kind=album", headers=AUTH)
+        assert result.status_code == 200
+        data = result.json()
+        assert data["partial"]
+        assert data["results"][0]["source"]["provider"] == "apple"
+        assert data["results"][0]["search_priority"] == 1.1
+        detail = c.get("/v1/items/apple/album/123", headers=AUTH)
+        assert detail.status_code == 200
+        assert detail.json()["external_ids"] == {"apple": "123"}
+        assert (
+            c.get("/v1/search?q=Album&kind=album&provider=apple&page=2", headers=AUTH).json()["results"] == []
+        )
+
+
+def test_musicbrainz_album_identity_uses_published_apple_link():
+    from folio_metadata.adapters.musicbrainz import linked_apple_ids
+
+    assert linked_apple_ids(
+        {"relations": [{"url": {"resource": "https://music.apple.com/us/album/title/123"}}]}
+    ) == {"123"}
+    for url in [
+        "https://music.apple.com.evil/album/123",
+        "http://music.apple.com/album/123",
+        "https://music.apple.com/album/123?i=456",
+    ]:
+        assert not linked_apple_ids({"relations": [{"url": {"resource": url}}]})
+
+    def handler(request):
+        if request.url.host == "itunes.apple.com":
+            return httpx.Response(
+                200,
+                json={"results": [{"collectionName": "Album", "artistName": "Artist", "collectionId": 123}]},
+            )
+        if "query" in request.url.params:
+            return httpx.Response(
+                200,
+                json={
+                    "release-groups": [{"id": MBID, "title": "Album", "artist-credit": [{"name": "Artist"}]}],
+                    "count": 1,
+                },
+            )
+        if "/release-group/" in request.url.path:
+            return httpx.Response(200, json={"releases": [{"id": MBID, "status": "Official"}]})
+        return httpx.Response(
+            200, json={"relations": [{"url": {"resource": "https://music.apple.com/us/album/123"}}]}
+        )
+
+    with client(handler) as c:
+        row = c.get("/v1/search?q=Album&kind=album&provider=musicbrainz", headers=AUTH).json()["results"][0]
+        assert row["external_ids"] == {"musicbrainz": MBID, "apple": "123"}

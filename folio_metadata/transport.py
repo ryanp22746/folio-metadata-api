@@ -13,6 +13,7 @@ import httpx
 from .config import Settings
 
 ORIGINS = {
+    "apple": "https://itunes.apple.com",
     "tmdb": "https://api.themoviedb.org/3",
     "vndb": "https://api.vndb.org/kana",
     "anilist": "https://graphql.anilist.co",
@@ -23,6 +24,7 @@ ORIGINS = {
     "steam": "https://api.steampowered.com",
 }
 INTERVALS = {
+    "apple": 3.0,
     "tmdb": 0.1,
     "vndb": 2.1,
     "anilist": 2.1,

@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from ..models import Media
 from .common import rating, safe_url, source
 
-FIELDS = "id,name,slug,summary,first_release_date,cover.url,genres.name,platforms.name,rating,aggregated_rating,websites.url"
+FIELDS = "id,name,slug,summary,first_release_date,cover.url,genres.name,platforms.name,rating,rating_count,aggregated_rating,websites.url"
 
 
 class IGDB:
@@ -43,10 +43,11 @@ def normalize(data, fetched_at):
     return Media(
         id=f"igdb:game:{identifier}",
         kind="game",
+        rating_count=data.get("rating_count"),
         title=data["name"],
         description=data.get("summary"),
         release_date=datetime.fromtimestamp(released, timezone.utc).date().isoformat() if released else None,
-        image_url=safe_url((data.get("cover") or {}).get("url")),
+        image_url=safe_url(((data.get("cover") or {}).get("url") or "").replace("t_thumb", "t_cover_big")),
         genres=[x["name"] for x in data.get("genres") or []],
         platforms=[x["name"] for x in data.get("platforms") or []],
         external_ids=ids,

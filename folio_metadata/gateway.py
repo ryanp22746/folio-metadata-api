@@ -4,6 +4,7 @@ import asyncio
 import re
 
 from .adapters.anilist import AniList
+from .adapters.apple import Apple
 from .adapters.catalog import TMDB, VNDB
 from .adapters.enrichment import OMDb, Steam
 from .adapters.igdb import IGDB
@@ -13,6 +14,7 @@ from .models import ProviderInfo
 from .transport import Disabled, NotConfigured, Transport
 
 DOCS = {
+    "apple": "https://performance-partners.apple.com/search-api",
     "tmdb": "https://developer.themoviedb.org/docs/getting-started",
     "vndb": "https://api.vndb.org/kana",
     "anilist": "https://docs.anilist.co/guide/terms-of-use",
@@ -40,6 +42,7 @@ class Gateway:
             "mangaupdates": MangaUpdates(self.http),
             "igdb": IGDB(self.http),
             "musicbrainz": MusicBrainz(self.http),
+            "apple": Apple(self.http),
             "omdb": OMDb(self.http),
             "steam": Steam(self.http),
         }

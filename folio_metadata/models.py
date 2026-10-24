@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 Kind = Literal["movie", "tv", "visual_novel", "anime", "manga", "game", "album", "track"]
-Provider = Literal["tmdb", "vndb", "anilist", "mangaupdates", "igdb", "musicbrainz", "omdb", "steam"]
+Provider = Literal["tmdb", "vndb", "anilist", "mangaupdates", "igdb", "musicbrainz", "apple", "omdb", "steam"]
 
 
 class Source(BaseModel):
@@ -54,6 +54,10 @@ class Media(BaseModel):
     id: str
     kind: Kind
     title: str
+    search_priority: float | None = None
+    facts: dict[str, str] = Field(default_factory=dict)
+    popularity: float | None = None
+    rating_count: int | None = None
     original_title: str | None = None
     description: str | None = None
     description_format: Literal["text", "vndb_markup", "html"] = "text"
