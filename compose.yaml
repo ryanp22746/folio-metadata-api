@@ -1,0 +1,23 @@
+services:
+  metadata:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      METADATA_API_KEY: ${METADATA_API_KEY:?Set a random API key of at least 32 characters}
+      TMDB_READ_TOKEN: ${TMDB_READ_TOKEN:-}
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 1
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

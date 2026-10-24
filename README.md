@@ -77,4 +77,3 @@ python -m ruff format --check .
 
 Tests use mocked provider responses and require no external credentials. CI also builds the Docker image. Dependency versions are pinned in requirements files; Dependabot proposes updates weekly. Add providers behind `Gateway` with mapping tests and explicit ID/terms handling; preserve the v1 response contract. Breaking changes belong under `/v2`.
 
-
