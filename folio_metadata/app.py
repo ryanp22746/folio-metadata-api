@@ -13,6 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import Settings
 from .gateway import Gateway
+from .identity import duplicate_groups
 from .models import Enrichment, Kind, Media, Provider, ProviderInfo, ProviderStatus, SearchResponse
 from .transport import Disabled, NotConfigured, ProviderError
 
@@ -130,6 +131,7 @@ def create_app(api_key=None, tmdb_token=None, transport=None, *, settings=None):
                 {"message": "No requested provider available", "providers": [s.model_dump() for s in states]},
             )
         return SearchResponse(
+            duplicate_groups=duplicate_groups([item for result in outcomes for item in result[0]]),
             results=[item for result in outcomes for item in result[0]],
             providers=states,
             partial=any(s.status != "ok" for s in states),

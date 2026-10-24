@@ -73,6 +73,7 @@ class Media(BaseModel):
 
 
 class SearchResponse(BaseModel):
+    duplicate_groups: list[dict] = Field(default_factory=list)
     results: list[Media]
     providers: list[ProviderStatus]
     partial: bool
