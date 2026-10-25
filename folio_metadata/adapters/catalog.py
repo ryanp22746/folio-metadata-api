@@ -1,5 +1,5 @@
 from ..models import Media
-from .common import rating, source
+from .common import rating, safe_url, source
 
 
 class TMDB:
@@ -22,7 +22,11 @@ class TMDB:
         doc = await self.http.request(
             "tmdb",
             f"/{kind}/{identifier}",
-            params={"append_to_response": "external_ids,credits", "language": "en-US"},
+            params={
+                "append_to_response": "external_ids,credits,images",
+                "language": "en-US",
+                "include_image_language": "en,null",
+            },
         )
         return normalize_tmdb(doc.data, kind, doc.fetched_at) if doc else None
 
@@ -49,7 +53,13 @@ class VNDB:
 
     async def detail(self, kind, identifier):
         doc = await self.http.request(
-            "vndb", "/vn", payload={"filters": ["id", "=", identifier], "fields": VN_FIELDS, "results": 1}
+            "vndb",
+            "/vn",
+            payload={
+                "filters": ["id", "=", identifier],
+                "fields": VN_FIELDS + ",screenshots.url,screenshots.sexual,screenshots.violence",
+                "results": 1,
+            },
         )
         return normalize_vn(doc.data["results"][0], doc.fetched_at) if doc and doc.data["results"] else None
 
@@ -77,6 +87,14 @@ def normalize_vn(data, fetched_at):
         description=data.get("description"),
         description_format="vndb_markup",
         release_date=data.get("released"),
+        backdrop_url=next(
+            (
+                safe_url(x.get("url"))
+                for x in data.get("screenshots", [])
+                if x.get("sexual") == 0 and x.get("violence") == 0 and safe_url(x.get("url"))
+            ),
+            None,
+        ),
         image_url=picture.get("url"),
         image_sexual=picture.get("sexual"),
         image_violence=picture.get("violence"),
@@ -91,6 +109,16 @@ def normalize_tmdb(data, kind, fetched_at):
     imdb = (data.get("external_ids") or {}).get("imdb_id") or data.get("imdb_id")
     if imdb:
         ids["imdb"] = imdb
+    logos = (data.get("images") or {}).get("logos") or []
+    logos = [
+        x
+        for x in logos
+        if x.get("iso_639_1") in ("en", None) and str(x.get("file_path", "")).endswith(".png")
+    ]
+    logos.sort(
+        key=lambda x: (x.get("iso_639_1") == "en", x.get("vote_average", 0), x.get("width", 0)), reverse=True
+    )
+    logo = logos[0].get("file_path") if logos else None
     origin = source("tmdb", identifier, f"https://www.themoviedb.org/{kind}/{identifier}", fetched_at)
     return Media(
         facts={
@@ -119,6 +147,10 @@ def normalize_tmdb(data, kind, fetched_at):
         ratings=rating(
             "TMDB users", data.get("vote_average") if data.get("vote_count") else None, 10, origin
         ),
+        logo_url=f"https://image.tmdb.org/t/p/w500{logo}" if logo else None,
+        backdrop_url=f"https://image.tmdb.org/t/p/w1280{data['backdrop_path']}"
+        if data.get("backdrop_path")
+        else None,
         id=f"tmdb:{kind}:{identifier}",
         kind=kind,
         title=data["title"] if kind == "movie" else data["name"],

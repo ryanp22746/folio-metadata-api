@@ -468,3 +468,89 @@ def test_musicbrainz_album_identity_uses_published_apple_link():
     with client(handler) as c:
         row = c.get("/v1/search?q=Album&kind=album&provider=musicbrainz", headers=AUTH).json()["results"][0]
         assert row["external_ids"] == {"musicbrainz": MBID, "apple": "123"}
+
+
+def test_tmdb_artwork_prefers_english_png_logo_and_keeps_backdrop():
+    from folio_metadata.adapters.catalog import normalize_tmdb
+
+    media = normalize_tmdb(
+        {
+            "id": 1,
+            "title": "Film",
+            "backdrop_path": "/wide.jpg",
+            "images": {
+                "logos": [
+                    {"file_path": "/foreign.png", "iso_639_1": "ja", "vote_average": 10},
+                    {"file_path": "/english.png", "iso_639_1": "en", "width": 500},
+                    {"file_path": "/neutral.png", "iso_639_1": None, "width": 1000},
+                    {"file_path": "/vector.svg", "iso_639_1": "en", "vote_average": 10},
+                ]
+            },
+        },
+        "movie",
+        "2026-10-24T00:00:00Z",
+    )
+    assert media.logo_url == "https://image.tmdb.org/t/p/w500/english.png"
+    assert media.backdrop_url == "https://image.tmdb.org/t/p/w1280/wide.jpg"
+    missing = normalize_tmdb({"id": 1, "title": "Film"}, "movie", "2026-10-24T00:00:00Z")
+    assert missing.logo_url is None and missing.backdrop_url is None
+
+
+def test_vndb_backdrop_requires_safe_content_votes():
+    from folio_metadata.adapters.catalog import normalize_vn
+
+    data = {
+        "id": "v1",
+        "title": "VN",
+        "screenshots": [
+            {"url": "https://s.vndb.org/unsafe.jpg", "sexual": 2, "violence": 0},
+            {"url": "https://s.vndb.org/unrated.jpg"},
+            {"url": "https://s.vndb.org/safe.jpg", "sexual": 0, "violence": 0},
+        ],
+    }
+    assert normalize_vn(data, "2026-10-24T00:00:00Z").backdrop_url == "https://s.vndb.org/safe.jpg"
+    data["screenshots"].pop()
+    assert normalize_vn(data, "2026-10-24T00:00:00Z").backdrop_url is None
+
+
+def test_igdb_optional_logo_outage_keeps_game_and_background():
+    def handler(request):
+        if request.url.host == "id.twitch.tv":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        if request.url.path.endswith("/logos"):
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": 1,
+                    "name": "Game",
+                    "slug": "game",
+                    "artworks": [{"url": "//images.igdb.com/igdb/image/upload/t_thumb/art.jpg"}],
+                }
+            ],
+        )
+
+    with client(handler, igdb_client_id="test-id", igdb_client_secret="test-secret") as c:
+        response = c.get("/v1/items/igdb/game/1", headers=AUTH)
+        assert response.status_code == 200
+        assert response.json()["logo_url"] is None
+        assert response.json()["backdrop_url"].endswith("/t_720p/art.jpg")
+
+
+def test_igdb_logo_uses_png_to_preserve_transparency():
+    def handler(request):
+        if request.url.host == "id.twitch.tv":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        if request.url.path.endswith("/logos"):
+            assert "alpha_channel = true" in request.content.decode()
+            return httpx.Response(
+                200,
+                json=[{"url": "//images.igdb.com/igdb/image/upload/t_thumb/logo.jpg", "alpha_channel": True}],
+            )
+        return httpx.Response(200, json=[{"id": 1, "name": "Game", "slug": "game"}])
+
+    with client(handler, igdb_client_id="test-id", igdb_client_secret="test-secret") as c:
+        response = c.get("/v1/items/igdb/game/1", headers=AUTH)
+        assert response.status_code == 200
+        assert response.json()["logo_url"] == "https://images.igdb.com/igdb/image/upload/t_720p/logo.png"

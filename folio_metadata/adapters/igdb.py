@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from ..models import Media
+from ..transport import ProviderError
 from .common import rating, safe_url, source
 
 FIELDS = "id,name,slug,summary,first_release_date,cover.url,genres.name,platforms.name,rating,rating_count,aggregated_rating,websites.url"
@@ -22,9 +23,29 @@ class IGDB:
 
     async def detail(self, kind, identifier):
         doc = await self.http.request(
-            "igdb", "/games", content=f"fields {FIELDS}; where id = {int(identifier)}; limit 1;"
+            "igdb",
+            "/games",
+            content=f"fields {FIELDS},artworks.url,screenshots.url; where id = {int(identifier)}; limit 1;",
         )
-        return normalize(doc.data[0], doc.fetched_at) if doc and doc.data else None
+        if not doc or not doc.data:
+            return None
+        media = normalize(doc.data[0], doc.fetched_at)
+        # Optional artwork must never make the primary game unavailable.
+        try:
+            logos = await self.http.request(
+                "igdb",
+                "/logos",
+                content=f"fields url,alpha_channel; where game = {int(identifier)} & alpha_channel = true; limit 1;",
+            )
+            if logos and logos.data:
+                media.logo_url = safe_url(
+                    re.sub(
+                        r"\.(?:jpg|jpeg)$", ".png", logos.data[0].get("url", "").replace("t_thumb", "t_720p")
+                    )
+                )
+        except ProviderError:
+            pass
+        return media
 
 
 def normalize(data, fetched_at):
@@ -48,6 +69,14 @@ def normalize(data, fetched_at):
         description=data.get("summary"),
         release_date=datetime.fromtimestamp(released, timezone.utc).date().isoformat() if released else None,
         image_url=safe_url(((data.get("cover") or {}).get("url") or "").replace("t_thumb", "t_cover_big")),
+        backdrop_url=next(
+            (
+                safe_url(x.get("url", "").replace("t_thumb", "t_720p"))
+                for x in (data.get("artworks") or data.get("screenshots") or [])
+                if safe_url(x.get("url", ""))
+            ),
+            None,
+        ),
         genres=[x["name"] for x in data.get("genres") or []],
         platforms=[x["name"] for x in data.get("platforms") or []],
         external_ids=ids,

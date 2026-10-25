@@ -103,3 +103,6 @@ The second command requires credentials in the environment. AniList is tested wi
 
 Add providers through an adapter and registry entry with mapping/failure tests. Preserve the v1 contract; breaking changes belong in a new version. Dependency updates are proposed by Dependabot. No webapp integration or deployment to a remote server is performed by this repository.
 
+
+
+Media detail responses include optional logo_url and backdrop_url fields. TMDB detail requests append image metadata, preferring English/neutral PNG title logos. IGDB detail retrieves artwork/screenshots and an optional transparent logo, requested as PNG to preserve alpha. VNDB detail can select a screenshot only with sexual=0 and violence=0; missing ratings do not qualify. Search responses remain lightweight, and absence of suitable artwork returns null. No artwork request accepts a client-supplied upstream URL.

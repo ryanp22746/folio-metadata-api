@@ -63,6 +63,8 @@ class Media(BaseModel):
     description_format: Literal["text", "vndb_markup", "html"] = "text"
     release_date: str | None = None
     image_url: str | None = None
+    logo_url: str | None = None
+    backdrop_url: str | None = None
     image_sexual: float | None = None
     image_violence: float | None = None
     genres: list[str] = Field(default_factory=list)
