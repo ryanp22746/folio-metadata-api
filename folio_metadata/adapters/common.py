@@ -9,7 +9,11 @@ def source(provider, identifier, url, fetched_at):
 
 
 def rating(label, value, scale, origin):
-    return [] if value is None else [Rating(label=label, value=f"{value}/{scale}", source=origin)]
+    return (
+        []
+        if value is None
+        else [Rating(label=label, value=f"{round(float(value), 1):g}/{scale}", source=origin)]
+    )
 
 
 def safe_url(value):

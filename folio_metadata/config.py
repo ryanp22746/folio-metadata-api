@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field, SecretStr
 
 class Settings(BaseModel):
     api_key: SecretStr = SecretStr("")
+    mal_client_id: SecretStr = SecretStr("")
+    spotify_client_id: SecretStr = SecretStr("")
+    spotify_client_secret: SecretStr = SecretStr("")
     tmdb_token: SecretStr = SecretStr("")
     igdb_client_id: SecretStr = SecretStr("")
     igdb_client_secret: SecretStr = SecretStr("")
@@ -21,6 +24,9 @@ class Settings(BaseModel):
     def from_env(cls):
         return cls(
             api_key=os.getenv("METADATA_API_KEY", ""),
+            mal_client_id=os.getenv("MAL_CLIENT_ID", ""),
+            spotify_client_id=os.getenv("SPOTIFY_CLIENT_ID", ""),
+            spotify_client_secret=os.getenv("SPOTIFY_CLIENT_SECRET", ""),
             tmdb_token=os.getenv("TMDB_READ_TOKEN", ""),
             igdb_client_id=os.getenv("IGDB_CLIENT_ID", ""),
             igdb_client_secret=os.getenv("IGDB_CLIENT_SECRET", ""),

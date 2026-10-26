@@ -22,6 +22,7 @@ COMIC_TYPES = [
 
 class MangaUpdates:
     kinds = ("manga",)
+    detail_kinds = ("manga", "book")
 
     def __init__(self, transport):
         self.http = transport
@@ -45,18 +46,21 @@ class MangaUpdates:
 
     async def detail(self, kind, identifier):
         doc = await self.http.request("mangaupdates", f"/series/{identifier}")
-        if not doc or doc.data.get("type") not in COMIC_TYPES:
+        if not doc or doc.data.get("type") not in COMIC_TYPES + ["Novel"]:
             return None
-        return normalize(doc.data, doc.fetched_at)
+        result = normalize(doc.data, doc.fetched_at)
+        return result if result.kind == kind else None
 
 
 def normalize(data, fetched_at):
     identifier = str(data["series_id"])
     url = safe_url(data.get("url")) or f"https://www.mangaupdates.com/series.html?id={identifier}"
     origin = source("mangaupdates", identifier, url, fetched_at)
+    kind = "book" if data.get("type") == "Novel" else "manga"
     return Media(
-        id=f"mangaupdates:manga:{identifier}",
-        kind="manga",
+        id=f"mangaupdates:{kind}:{identifier}",
+        kind=kind,
+        rating_count=data.get("rating_votes"),
         title=data["title"],
         description=data.get("description"),
         description_format="html",
@@ -65,6 +69,15 @@ def normalize(data, fetched_at):
         image_url=safe_url(((data.get("image") or {}).get("url") or {}).get("original")),
         genres=[x["genre"] for x in data.get("genres") or []],
         creators=list(dict.fromkeys(x["name"] for x in data.get("authors") or [] if x.get("name"))),
+        credits=[
+            {
+                "name": row["name"],
+                "role": row["type"] if row.get("type") in ("Author", "Artist") else "Creator",
+                "url": safe_url(row.get("url")),
+            }
+            for row in data.get("authors") or []
+            if row.get("name")
+        ],
         ratings=rating("MangaUpdates Bayesian", data.get("bayesian_rating"), 10, origin),
         external_ids={"mangaupdates": identifier},
         source=origin,

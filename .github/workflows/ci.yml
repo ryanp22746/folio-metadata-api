@@ -30,7 +30,7 @@ jobs:
           else:
               raise SystemExit('Container did not become healthy')
           PY
-          docker exec metadata-test python -c "import json,urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/v1/providers',headers={'Authorization':'Bearer ci-only-placeholder-key-32-characters'}); assert len(json.load(urllib.request.urlopen(req))) == 8"
+          docker exec metadata-test python -c "import json,urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/v1/providers',headers={'Authorization':'Bearer ci-only-placeholder-key-32-characters'}); assert len(json.load(urllib.request.urlopen(req))) == 13"
       - name: Container logs and cleanup
         if: always()
         run: |

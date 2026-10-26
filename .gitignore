@@ -5,3 +5,8 @@ __pycache__/
 .env
 *.pyc
 webapp/
+
+.local-backups/
+
+/*-preview.png
+/discovery-filters-yotsuba.png
