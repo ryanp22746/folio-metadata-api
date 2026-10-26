@@ -11,15 +11,20 @@ import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from . import albums as album_catalog
+from . import associations
+from . import collections as collection_catalog
+from . import creators as creator_catalog
 from .config import Settings
 from .gateway import Gateway
 from .identity import duplicate_groups
 from .models import Enrichment, Kind, Media, Provider, ProviderInfo, ProviderStatus, SearchResponse
-from .transport import Disabled, NotConfigured, ProviderError
+from .transport import Disabled, NotConfigured, ProviderError, refresh_requested
 
 log = logging.getLogger("uvicorn.error")
 security = HTTPBearer(auto_error=False)
 UPSTREAM_ERRORS = (
+    httpx.HTTPError,
     ProviderError,
     KeyError,
     TypeError,
@@ -52,19 +57,23 @@ def create_app(api_key=None, tmdb_token=None, transport=None, *, settings=None):
             follow_redirects=False,
             transport=transport,
             limits=httpx.Limits(max_connections=16),
-            headers={"User-Agent": "FolioMetadata/0.2"},
+            headers={"User-Agent": "FolioMetadata/0.3"},
         ) as client:
             app.state.gateway = Gateway(client, config)
             yield
 
-    app = FastAPI(title="Folio Metadata API", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="Folio Metadata API", version="0.3.0", lifespan=lifespan)
     requests = deque()
 
     @app.middleware("http")
     async def observe(request: Request, call_next):
         request_id = uuid.uuid4().hex
         started = time.monotonic()
-        response = await call_next(request)
+        token = refresh_requested.set(request.query_params.get("refresh") == "true")
+        try:
+            response = await call_next(request)
+        finally:
+            refresh_requested.reset(token)
         response.headers["X-Request-ID"] = request_id
         response.headers["Cache-Control"] = "no-store"
         log.info(
@@ -93,6 +102,99 @@ def create_app(api_key=None, tmdb_token=None, transport=None, *, settings=None):
     @app.get("/v1/providers", response_model=list[ProviderInfo], dependencies=[Depends(authorize)])
     async def providers(request: Request):
         return request.app.state.gateway.catalog()
+
+    @app.get("/v1/creators/find", dependencies=[Depends(authorize)])
+    async def find_creators(request: Request, q: str = Query(min_length=2, max_length=120)):
+        if not q.strip() or any(ord(c) < 32 for c in q):
+            raise HTTPException(422, "Creator name must contain text")
+        return await creator_catalog.find(request.app.state.gateway.http, q.strip())
+
+    @app.get("/v1/creators/{provider}/{identifier}/works", dependencies=[Depends(authorize)])
+    async def creator_works(
+        request: Request,
+        provider: Literal[
+            "mal_studio",
+            "vndb",
+            "tmdb",
+            "mangaupdates",
+            "musicbrainz",
+            "openlibrary",
+            "igdb",
+            "tmdb_company",
+            "apple",
+            "spotify",
+        ],
+        identifier: str,
+        page: int = Query(default=1, ge=1, le=100),
+    ):
+        if not creator_catalog.valid(provider, identifier):
+            raise HTTPException(422, "Invalid creator identifier")
+        try:
+            result = await asyncio.wait_for(
+                creator_catalog.works(request.app.state.gateway.http, provider, identifier, page), 25
+            )
+        except (Disabled, NotConfigured):
+            raise HTTPException(503, "This creator source is not configured")
+        except UPSTREAM_ERRORS:
+            raise HTTPException(502, "Creator source temporarily unavailable")
+        if result is None:
+            raise HTTPException(404, "Creator not found")
+        return result
+
+    @app.get("/v1/albums/{provider}/{identifier}/tracks", dependencies=[Depends(authorize)])
+    async def album_tracks(
+        request: Request,
+        provider: Literal["spotify", "apple", "musicbrainz"],
+        identifier: str,
+        page: int = Query(default=1, ge=1, le=100),
+    ):
+        if not creator_catalog.valid(provider, identifier):
+            raise HTTPException(422, "Invalid album identifier")
+        try:
+            result = await asyncio.wait_for(
+                album_catalog.tracks(request.app.state.gateway.http, provider, identifier, page), 25
+            )
+        except (Disabled, NotConfigured):
+            raise HTTPException(503, "This album source is not configured")
+        except UPSTREAM_ERRORS:
+            raise HTTPException(502, "Album tracks temporarily unavailable")
+        if result is None:
+            raise HTTPException(404, "Album not found")
+        return result
+
+    @app.get("/v1/collections/{provider}/{kind}/{identifier}", dependencies=[Depends(authorize)])
+    async def collection_entries(
+        request: Request,
+        provider: Literal["tmdb", "igdb"],
+        kind: Kind,
+        identifier: str,
+        page: int = Query(default=1, ge=1, le=100),
+    ):
+        if not collection_catalog.valid(provider, kind, identifier):
+            raise HTTPException(422, "Invalid series or collection identifier")
+        try:
+            result = await asyncio.wait_for(
+                collection_catalog.listing(request.app.state.gateway.http, provider, kind, identifier, page),
+                25,
+            )
+        except (Disabled, NotConfigured):
+            raise HTTPException(503, "This collection source is not configured")
+        except UPSTREAM_ERRORS:
+            raise HTTPException(502, "Collection temporarily unavailable")
+        if result is None:
+            raise HTTPException(404, "Collection not found")
+        return result
+
+    @app.get("/v1/characters/find", dependencies=[Depends(authorize)])
+    async def character_matches(request: Request, q: str = Query(min_length=3, max_length=120)):
+        if not q.strip() or any(ord(c) < 32 for c in q):
+            raise HTTPException(422, "Character name must contain text")
+        try:
+            return await asyncio.wait_for(
+                associations.characters(request.app.state.gateway.http, q.strip()), 18
+            )
+        except UPSTREAM_ERRORS:
+            raise HTTPException(502, "Character catalog temporarily unavailable")
 
     @app.get("/v1/search", response_model=SearchResponse, dependencies=[Depends(authorize)])
     async def search(

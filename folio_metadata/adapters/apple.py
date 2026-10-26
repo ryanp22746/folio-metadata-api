@@ -5,7 +5,7 @@ from .common import safe_url, source
 class Apple:
     """Key-free US album catalog discovery; source order is relevance, not a listener count."""
 
-    kinds = ("album",)
+    kinds = ("album", "track")
 
     def __init__(self, transport):
         self.http = transport
@@ -14,7 +14,14 @@ class Apple:
         if page > 1:
             return [], False
         doc = await self.http.request(
-            "apple", "/search", params={"term": query, "entity": "album", "limit": 20, "country": "US"}
+            "apple",
+            "/search",
+            params={
+                "term": query,
+                "entity": "song" if kind == "track" else "album",
+                "limit": 20,
+                "country": "US",
+            },
         )
         return [
             normalize(x, doc.fetched_at, index) for index, x in enumerate(doc.data.get("results", []))
@@ -22,30 +29,70 @@ class Apple:
 
     async def detail(self, kind, identifier):
         doc = await self.http.request(
-            "apple", "/lookup", params={"id": identifier, "entity": "album", "country": "US"}
+            "apple",
+            "/lookup",
+            params={"id": identifier, "entity": "song" if kind == "track" else "album", "country": "US"},
         )
         rows = doc.data.get("results", []) if doc else []
         return next(
             (
                 normalize(x, doc.fetched_at)
                 for x in rows
-                if str(x.get("collectionId")) == identifier and x.get("wrapperType") == "collection"
+                if (
+                    kind == "album"
+                    and str(x.get("collectionId")) == identifier
+                    and x.get("wrapperType") == "collection"
+                )
+                or (kind == "track" and str(x.get("trackId")) == identifier and x.get("kind") == "song")
             ),
             None,
         )
 
 
 def normalize(data, fetched_at, index=None):
-    identifier = str(data["collectionId"])
+    track = data.get("kind") == "song"
+    kind = "track" if track else "album"
+    identifier = str(data["trackId"] if track else data["collectionId"])
     return Media(
-        id=f"apple:album:{identifier}",
-        kind="album",
-        title=data["collectionName"],
+        id=f"apple:{kind}:{identifier}",
+        kind=kind,
+        title=data["trackName"] if track else data["collectionName"],
+        format="Track" if track else "Album",
         creators=[data["artistName"]],
+        credits=[
+            {
+                "name": data["artistName"],
+                "role": "Artist",
+                "url": f"https://music.apple.com/us/artist/{data['artistId']}",
+            }
+        ]
+        if str(data.get("artistId", "")).isdigit()
+        else [],
         release_date=(data.get("releaseDate") or "")[:10] or None,
         image_url=safe_url((data.get("artworkUrl100") or "").replace("100x100bb", "600x600bb")),
         genres=[data["primaryGenreName"]] if data.get("primaryGenreName") else [],
         facts={
+            **(
+                {
+                    "Album": data.get("collectionName", ""),
+                    "Track number": str(data.get("trackNumber") or ""),
+                    "Disc": str(data.get("discNumber") or 1),
+                }
+                if track
+                else {}
+            ),
+            **(
+                {
+                    "Duration": f"{int(data['trackTimeMillis']) // 60000}:{int(data['trackTimeMillis']) // 1000 % 60:02}"
+                }
+                if track and data.get("trackTimeMillis") is not None
+                else {}
+            ),
+            **(
+                {"Explicit content": "Yes" if data["trackExplicitness"] == "explicit" else "No"}
+                if track and data.get("trackExplicitness")
+                else {}
+            ),
             **({"Tracks": str(data["trackCount"])} if data.get("trackCount") else {}),
             **(
                 {
@@ -64,7 +111,8 @@ def normalize(data, fetched_at, index=None):
         source=source(
             "apple",
             identifier,
-            safe_url(data.get("collectionViewUrl")) or f"https://music.apple.com/us/album/{identifier}",
+            safe_url(data.get("trackViewUrl") if track else data.get("collectionViewUrl"))
+            or f"https://music.apple.com/us/{'song' if track else 'album'}/{identifier}",
             fetched_at,
         ),
     )

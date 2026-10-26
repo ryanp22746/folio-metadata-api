@@ -5,7 +5,7 @@ from .common import fuzzy_date, rating, safe_url, source
 FIELDS = """
 id idMal type format title { romaji english native }
 description(asHtml: true) startDate { year month day }
-coverImage { large } genres averageScore
+coverImage { large } genres averageScore chapters volumes
 """
 SEARCH = """query($query: String!, $type: MediaType!, $page: Int!) {
   Page(page: $page, perPage: 20) {
@@ -14,7 +14,8 @@ SEARCH = """query($query: String!, $type: MediaType!, $page: Int!) {
   }
 }""".replace("FIELDS", FIELDS)
 DETAIL = "query($id: Int!, $type: MediaType!) { Media(id: $id, type: $type) { FIELDS } }".replace(
-    "FIELDS", FIELDS
+    "FIELDS",
+    FIELDS + " relations { edges { relationType node { id type title { english romaji native } } } }",
 )
 
 
@@ -70,6 +71,24 @@ def normalize(data, fetched_at):
         image_url=safe_url((data.get("coverImage") or {}).get("large")),
         genres=data.get("genres") or [],
         format=data.get("format"),
+        facts={
+            label: str(data[field])
+            for field, label in [("chapters", "Chapters"), ("volumes", "Volumes")]
+            if isinstance(data.get(field), int) and data[field] > 0
+        },
+        related_media=[
+            {
+                "provider": "anilist",
+                "kind": row["node"]["type"].lower(),
+                "id": str(row["node"]["id"]),
+                "title": row["node"]["title"].get("english")
+                or row["node"]["title"].get("romaji")
+                or row["node"]["title"].get("native"),
+                "relation": row.get("relationType", "related").lower(),
+            }
+            for row in (data.get("relations") or {}).get("edges", [])
+            if row.get("node", {}).get("type") in {"ANIME", "MANGA"}
+        ],
         external_ids=ids,
         ratings=rating("AniList average", data.get("averageScore"), 100, origin),
         source=origin,

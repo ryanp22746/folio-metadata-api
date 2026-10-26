@@ -15,11 +15,11 @@ Health reports process availability, independently of third-party outages. Logs 
 
 ## Connecting the webapp later
 
-Store `METADATA_API_BASE_URL` and `METADATA_API_KEY` in the webapp backend's secret environment. These are suggested integration variable names, not existing webapp configuration. The browser calls its own backend; the backend adds the bearer key when calling this API. Never put service/provider keys in public frontend environment variables. CORS is intentionally disabled.
+Store `METADATA_API_BASE_URL` and `METADATA_API_KEY` in the webapp backend's secret environment. The Folio web server implements these environment variables in its metadata proxy. The browser calls its own backend; the backend adds the bearer key when calling this API. Never put service/provider keys in public frontend environment variables. CORS is intentionally disabled.
 
 The backend should proxy search with explicit kind/provider filters, fetch detail after the user chooses a result, and optionally request `enrich=true`. Preserve provider IDs, source timestamps and attribution when saving metadata. Do not overwrite personal edits automatically. Display partial/unavailable states honestly. Escape descriptions or sanitize labeled HTML/markup before rendering.
 
-Verify the connection with one search, one selected detail, one saved library item, and a simulated provider outage. Confirm that credentials are absent from browser requests, bundles and logs. The webapp itself has not been modified by this API implementation.
+Verify the connection with one search, one selected detail, one saved library item, and a simulated provider outage. Confirm that credentials are absent from browser requests, bundles and logs. Deploy the matching Folio webapp v0.3.0 release and verify its same-origin metadata proxy.
 
 ## Updates and rollback
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from collections import OrderedDict
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -13,6 +14,10 @@ import httpx
 from .config import Settings
 
 ORIGINS = {
+    "spotify": "https://api.spotify.com/v1",
+    "mal": "https://api.myanimelist.net/v2",
+    "jikan": "https://api.jikan.moe/v4",
+    "openlibrary": "https://openlibrary.org",
     "apple": "https://itunes.apple.com",
     "tmdb": "https://api.themoviedb.org/3",
     "vndb": "https://api.vndb.org/kana",
@@ -24,6 +29,10 @@ ORIGINS = {
     "steam": "https://api.steampowered.com",
 }
 INTERVALS = {
+    "spotify": 0.2,
+    "mal": 1.1,
+    "jikan": 1.1,
+    "openlibrary": 1.1,
     "apple": 3.0,
     "tmdb": 0.1,
     "vndb": 2.1,
@@ -36,6 +45,7 @@ INTERVALS = {
 }
 MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_CACHE_BYTES = 32 * 1024 * 1024
+refresh_requested = ContextVar("refresh_requested", default=False)
 
 
 class ProviderError(Exception):
@@ -66,12 +76,17 @@ class Transport:
         self.oauth_lock = asyncio.Lock()
         self.access_token = ""
         self.token_expiry = 0.0
+        self.spotify_oauth_lock = asyncio.Lock()
+        self.spotify_access_token = ""
+        self.spotify_token_expiry = 0.0
 
     def require(self, provider):
         s = self.settings
         if provider == "anilist" and not s.anilist_enabled:
             raise Disabled()
         needed = {
+            "spotify": [s.spotify_client_id, s.spotify_client_secret],
+            "mal": [s.mal_client_id],
             "tmdb": [s.tmdb_token],
             "igdb": [s.igdb_client_id, s.igdb_client_secret],
             "omdb": [s.omdb_api_key],
@@ -121,6 +136,31 @@ class Transport:
         # Never retry earlier than the provider requests.
         self.next_call[provider] = time.monotonic() + max(60, delay)
 
+    async def _spotify_token(self):
+        async with self.spotify_oauth_lock:
+            if self.spotify_access_token and self.spotify_token_expiry > time.monotonic():
+                return self.spotify_access_token
+            status, headers, body = await self._read(
+                "POST",
+                "https://accounts.spotify.com/api/token",
+                auth=httpx.BasicAuth(
+                    self.settings.spotify_client_id.get_secret_value(),
+                    self.settings.spotify_client_secret.get_secret_value(),
+                ),
+                data={"grant_type": "client_credentials"},
+            )
+            if status in (429, 503):
+                self._backoff("spotify", headers)
+            if status != 200:
+                raise ProviderError()
+            data = json.loads(body)
+            token = data.get("access_token")
+            if not isinstance(token, str) or not token:
+                raise ProviderError()
+            self.spotify_access_token = token
+            self.spotify_token_expiry = time.monotonic() + max(0, int(data["expires_in"]) - 60)
+            return token
+
     async def request(self, provider, path, *, payload=None, params=None, content=None):
         self.require(provider)
         # Only adapters select paths. Neither client-supplied URLs nor redirects are accepted.
@@ -139,7 +179,7 @@ class Transport:
         async with self.locks[provider]:
             now = time.monotonic()
             cached = self.cache.get(key)
-            if cached and cached[0] > now:
+            if cached and cached[0] > now and not refresh_requested.get():
                 self.cache.move_to_end(key)
                 return cached[1]
             if cached:
@@ -151,7 +191,11 @@ class Transport:
                 await asyncio.sleep(delay)
             params = dict(params or {})
             headers = {}
-            if provider == "tmdb":
+            if provider == "mal":
+                headers["X-MAL-CLIENT-ID"] = self.settings.mal_client_id.get_secret_value()
+            elif provider == "spotify":
+                headers["Authorization"] = f"Bearer {await self._spotify_token()}"
+            elif provider == "tmdb":
                 headers["Authorization"] = f"Bearer {self.settings.tmdb_token.get_secret_value()}"
             elif provider == "igdb":
                 headers = {
@@ -161,7 +205,7 @@ class Transport:
                 }
             elif provider == "omdb":
                 params["apikey"] = self.settings.omdb_api_key.get_secret_value()
-            elif provider == "musicbrainz":
+            elif provider in ("musicbrainz", "openlibrary"):
                 headers["User-Agent"] = f"FolioMetadata/0.2 ({self.settings.musicbrainz_contact})"
             for attempt in range(2):
                 self.next_call[provider] = time.monotonic() + INTERVALS[provider]
@@ -176,6 +220,11 @@ class Transport:
                 if status == 401 and provider == "igdb" and attempt == 0:
                     self.access_token = ""
                     headers["Authorization"] = f"Bearer {await self._token()}"
+                    await asyncio.sleep(INTERVALS[provider])
+                    continue
+                if status == 401 and provider == "spotify" and attempt == 0:
+                    self.spotify_access_token = ""
+                    headers["Authorization"] = f"Bearer {await self._spotify_token()}"
                     await asyncio.sleep(INTERVALS[provider])
                     continue
                 break

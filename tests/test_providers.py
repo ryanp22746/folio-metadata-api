@@ -29,9 +29,11 @@ def no_network(request):
 def test_catalog_and_missing_configuration():
     with client(no_network) as c:
         catalog = c.get("/v1/providers", headers=AUTH)
-        assert len(catalog.json()) == 9
+        assert len(catalog.json()) == 13
         states = {x["provider"]: x["status"] for x in catalog.json()}
         assert states["anilist"] == "disabled"
+        assert states["jikan"] == "ready"
+        assert states["mal"] == "not_configured"
         assert states["igdb"] == states["omdb"] == states["tmdb"] == "not_configured"
         assert states["musicbrainz"] == states["mangaupdates"] == states["steam"] == "ready"
         assert c.get("/v1/providers").status_code == 401
@@ -554,3 +556,287 @@ def test_igdb_logo_uses_png_to_preserve_transparency():
         response = c.get("/v1/items/igdb/game/1", headers=AUTH)
         assert response.status_code == 200
         assert response.json()["logo_url"] == "https://images.igdb.com/igdb/image/upload/t_720p/logo.png"
+
+
+def test_openlibrary_book_search_and_work_details():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert request.url.host == "openlibrary.org"
+        assert "FolioMetadata" in request.headers["User-Agent"]
+        if request.url.path == "/search.json":
+            if request.url.params["q"].startswith("key:"):
+                assert request.url.params["q"] == "key:/works/OL1W"
+                return httpx.Response(
+                    200,
+                    json={
+                        "docs": [
+                            {
+                                "key": "/works/OL1W",
+                                "title": "Book",
+                                "author_name": ["Author"],
+                                "first_publish_year": 1965,
+                                "cover_i": 12,
+                            }
+                        ]
+                    },
+                )
+            assert request.url.params["limit"] == "20"
+            assert request.url.params["page"] == "2"
+            return httpx.Response(
+                200,
+                json={
+                    "numFound": 42,
+                    "docs": [
+                        {
+                            "key": "/works/OL1W",
+                            "title": "Book",
+                            "author_name": ["Author"],
+                            "first_publish_year": 1965,
+                            "cover_i": 12,
+                            "ratings_average": 4.37,
+                            "ratings_count": 20,
+                        },
+                        {"key": "/works/../../evil", "title": "Wrong"},
+                    ],
+                },
+            )
+        if request.url.path == "/works/OL1W.json":
+            return httpx.Response(
+                200,
+                json={
+                    "key": "/works/OL1W",
+                    "title": "Book",
+                    "description": {"value": "Overview"},
+                    "first_publish_date": "June 1975",
+                    "authors": [
+                        {"author": {"key": "/authors/OL1A"}},
+                        {"author": {"key": "https://evil.test/"}},
+                    ],
+                    "covers": [-1, 12],
+                },
+            )
+        assert request.url.path == "/authors/OL1A.json"
+        return httpx.Response(200, json={"name": "Author"})
+
+    with client(handler) as c:
+        data = c.get("/v1/search?q=Book&kind=book&provider=openlibrary&page=2", headers=AUTH).json()
+        assert data["more"] and len(data["results"]) == 1
+        assert data["results"][0]["ratings"][0]["value"] == "4.4/5"
+        media = c.get("/v1/items/openlibrary/book/OL1W", headers=AUTH).json()
+        assert media["creators"] == ["Author"]
+        assert media["description"] == "Overview"
+        assert media["release_date"] == "1965"
+        assert media["external_ids"] == {"openlibrary": "OL1W"}
+        assert media["image_url"] == "https://covers.openlibrary.org/b/id/12-L.jpg?default=false"
+        before = len(calls)
+        assert c.get("/v1/items/openlibrary/book/OL1A", headers=AUTH).status_code == 422
+        assert len(calls) == before
+
+
+def test_official_vn_titles_and_game_aliases_are_retained():
+    from folio_metadata.adapters.catalog import normalize_vn
+    from folio_metadata.adapters.igdb import normalize
+
+    vn = normalize_vn(
+        {
+            "id": "v1",
+            "title": "Romanized",
+            "titles": [
+                {"title": "Official English", "official": True},
+                {"title": "Unofficial", "official": False},
+            ],
+        },
+        "2026-10-24T00:00:00Z",
+    )
+    assert vn.alternative_titles == ["Official English"]
+    game = normalize(
+        {"id": 1, "name": "Title III", "slug": "title-iii", "alternative_names": [{"name": "Title 3"}]},
+        "2026-10-24T00:00:00Z",
+    )
+    assert game.alternative_titles == ["Title 3"]
+
+
+def test_openlibrary_description_timeout_keeps_primary_book():
+    def handler(request):
+        if request.url.path == "/search.json":
+            return httpx.Response(
+                200, json={"docs": [{"key": "/works/OL1W", "title": "Book", "first_publish_year": 1965}]}
+            )
+        raise httpx.ReadTimeout("optional description unavailable")
+
+    with client(handler) as c:
+        response = c.get("/v1/items/openlibrary/book/OL1W", headers=AUTH)
+        assert response.status_code == 200
+        assert response.json()["release_date"] == "1965"
+
+
+def test_openlibrary_catalog_subjects_become_readable_genres():
+    from folio_metadata.adapters.openlibrary import book_genres
+
+    assert book_genres(
+        [
+            "Ciencia-ficciﾃｳn",
+            "Hugo Award Winner",
+            "award:hugo_award=1970",
+            "award:hugo_award=novel",
+            "human nature",
+            "Science fiction",
+            "Fiction, science fiction, general",
+            "LGBTQ gender identity",
+        ]
+    ) == ["Science fiction"]
+    assert book_genres([None, 42, {}, "nyt:series_books=2010"]) == []
+    assert book_genres(["Fantasy fiction", "Fantasy", "Historical fiction"]) == [
+        "Fantasy",
+        "Historical fiction",
+    ]
+
+
+def test_tmdb_rich_details_and_regional_watch_availability():
+    def handler(request):
+        assert "watch/providers" in request.url.params["append_to_response"]
+        assert "release_dates" in request.url.params["append_to_response"]
+        return httpx.Response(
+            200,
+            json={
+                "id": 1,
+                "title": "Film",
+                "runtime": 120,
+                "production_companies": [{"name": "Studio"}],
+                "credits": {
+                    "cast": [{"id": 2, "name": "Actor", "character": "Lead"}],
+                    "crew": [{"id": 3, "name": "Director", "job": "Director"}],
+                },
+                "alternative_titles": {"titles": [{"title": "Other title"}]},
+                "release_dates": {
+                    "results": [
+                        {
+                            "iso_3166_1": "US",
+                            "release_dates": [
+                                {"release_date": "2026-10-24T00:00:00Z", "type": 3, "certification": "PG"}
+                            ],
+                        }
+                    ]
+                },
+                "watch/providers": {
+                    "results": {
+                        "US": {
+                            "link": "https://www.themoviedb.org/movie/1/watch?locale=US",
+                            "flatrate": [{"provider_name": "Service", "logo_path": "/logo.jpg"}],
+                            "buy": [{"provider_name": "Service"}],
+                        },
+                        "CA": {"link": "javascript:alert(1)", "rent": []},
+                    }
+                },
+                "videos": {
+                    "results": [
+                        {"site": "YouTube", "type": "Trailer", "official": True, "key": "abcdefghijk"}
+                    ]
+                },
+            },
+        )
+
+    with client(handler, tmdb_token="token") as c:
+        response = c.get("/v1/items/tmdb/movie/1", headers=AUTH)
+        assert response.status_code == 200
+        media = response.json()
+        assert media["facts"]["Studios"] == "Studio"
+        assert media["credits"][0]["character"] == "Lead"
+        assert media["credits"][1]["role"] == "Director"
+        assert media["releases"][0]["type"] == "Theatrical"
+        assert media["watch_status"] == "ok"
+        assert [x["type"] for x in media["watch_regions"]["US"]["offers"]] == ["Subscription", "Buy"]
+        assert media["watch_regions"]["CA"]["url"] is None
+        assert media["trailer_url"] == "https://www.youtube.com/watch?v=abcdefghijk"
+        assert media["alternative_titles"] == ["Other title"]
+
+
+def test_tmdb_optional_watch_failure_keeps_primary_and_tv_has_no_movie_releases():
+    def handler(request):
+        assert "release_dates" not in request.url.params["append_to_response"]
+        return httpx.Response(
+            200, json={"id": 1, "name": "TV", "watch/providers": {"success": False, "status_code": 34}}
+        )
+
+    with client(handler, tmdb_token="token") as c:
+        media = c.get("/v1/items/tmdb/tv/1", headers=AUTH).json()
+        assert media["title"] == "TV"
+        assert media["watch_status"] == "unavailable"
+        assert media["watch_regions"] == {}
+
+
+def test_spotify_links_only_accept_explicit_album_relationships():
+    from folio_metadata.adapters.musicbrainz import linked_spotify_urls
+
+    album = "5g5JAnBYxmaTMVvh6RnA1c"
+    data = {
+        "relations": [
+            {"url": {"resource": url}}
+            for url in [
+                f"https://open.spotify.com/album/{album}?si=tracking",
+                f"https://open.spotify.com/intl-fr/album/{album}",
+                f"https://open.spotify.com.evil.test/album/{album}",
+                f"https://user@open.spotify.com/album/{album}",
+                f"https://open.spotify.com/track/{album}",
+                "https://open.spotify.com/search/Album",
+            ]
+        ]
+    }
+    assert linked_spotify_urls(data) == [f"https://open.spotify.com/album/{album}"]
+
+
+def test_musicbrainz_detail_finds_spotify_on_a_linked_official_edition():
+    release_id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    spotify_id = "5g5JAnBYxmaTMVvh6RnA1c"
+
+    def handler(request):
+        if request.url.path == f"/ws/2/release-group/{MBID}":
+            return httpx.Response(
+                200,
+                json={"id": MBID, "title": "Album", "releases": [{"id": release_id, "status": "Official"}]},
+            )
+        assert request.url.path == "/ws/2/release"
+        assert request.url.params["release-group"] == MBID
+        assert request.url.params["limit"] == "20"
+        return httpx.Response(
+            200,
+            json={
+                "releases": [
+                    {
+                        "id": release_id,
+                        "status": "Official",
+                        "release-group": {"id": MBID},
+                        "relations": [{"url": {"resource": f"https://open.spotify.com/album/{spotify_id}"}}],
+                    }
+                ]
+            },
+        )
+
+    with client(handler) as c:
+        response = c.get(f"/v1/items/musicbrainz/album/{MBID}", headers=AUTH)
+        assert response.status_code == 200
+        assert response.json()["media_links"] == [
+            {
+                "label": "Spotify \u00b7 Listen (linked edition)",
+                "url": f"https://open.spotify.com/album/{spotify_id}",
+            }
+        ]
+
+
+def test_igdb_search_supplements_native_results_with_popular_titles():
+    def handler(request):
+        if request.url.host == "id.twitch.tv":
+            return httpx.Response(200, json={"access_token": "token", "expires_in": 3600})
+        body = request.content.decode()
+        if "sort total_rating_count" in body:
+            return httpx.Response(
+                200,
+                json=[{"id": 2, "name": "Cyberpunk 2077", "slug": "cyberpunk-2077", "rating_count": 10000}],
+            )
+        return httpx.Response(200, json=[{"id": 1, "name": "Cyberpunk", "slug": "cyberpunk"}])
+
+    with client(handler, igdb_client_id="id", igdb_client_secret="secret") as c:
+        data = c.get("/v1/search?q=cyberpunk&provider=igdb", headers=AUTH).json()
+        assert {m["title"] for m in data["results"]} == {"Cyberpunk", "Cyberpunk 2077"}

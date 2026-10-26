@@ -3,7 +3,7 @@ import re
 import unicodedata
 from urllib.parse import urlsplit
 
-from ..models import Media
+from ..models import Media, MediaLink
 from ..transport import ProviderError
 from .common import rating, source
 
@@ -28,6 +28,27 @@ def linked_apple_ids(data):
         ):
             ids.add(match[1])
     return ids
+
+
+def linked_spotify_urls(data):
+    """Only source-linked Spotify album IDs; never guess from a title match."""
+    urls = set()
+    for relation in data.get("relations", []):
+        parsed = urlsplit((relation.get("url") or {}).get("resource", ""))
+        match = re.fullmatch(r"/(?:intl-[a-z]{2}/)?album/([A-Za-z0-9]{22})/?", parsed.path)
+        if parsed.scheme == "https" and parsed.netloc == "open.spotify.com" and match:
+            urls.add(f"https://open.spotify.com/album/{match[1]}")
+    return sorted(urls)
+
+
+def add_spotify_links(media, data):
+    known = {link.url for link in media.media_links}
+    for url in linked_spotify_urls(data):
+        if len(media.media_links) >= 4:
+            break
+        if url not in known:
+            edition = str(data.get("disambiguation") or "linked edition")[:100]
+            media.media_links.append(MediaLink(label=f"Spotify \u00b7 Listen ({edition})", url=url))
 
 
 class MusicBrainz:
@@ -103,7 +124,7 @@ class MusicBrainz:
                         pass
         return records, page * 20 < doc.data["count"]
 
-    async def album_links(self, identifier, data=None):
+    async def album_links(self, identifier, data=None, media=None):
         if data is None:
             doc = await self.http.request(
                 "musicbrainz",
@@ -112,6 +133,37 @@ class MusicBrainz:
             )
             data = doc.data if doc else {}
         ids = linked_apple_ids(data)
+        if media is not None:
+            add_spotify_links(media, data)
+        if media is not None:
+            if media.media_links or not data.get("releases"):
+                return ids
+            # One bounded browse, not one request per edition. Exact group identity only.
+            doc = await self.http.request(
+                "musicbrainz",
+                "/release",
+                params={
+                    "release-group": identifier,
+                    "status": "official",
+                    "limit": 20,
+                    "fmt": "json",
+                    "inc": "url-rels+release-groups",
+                },
+            )
+            edition_ids = set()
+            for edition in (doc.data.get("releases", []) if doc else [])[:20]:
+                if (
+                    edition.get("status") != "Official"
+                    or (edition.get("release-group") or {}).get("id") != identifier
+                ):
+                    continue
+                add_spotify_links(media, edition)
+                edition_ids.update(linked_apple_ids(edition))
+            if len(media.media_links) > 1:
+                for index, link in enumerate(media.media_links, 1):
+                    if link.label.endswith("(linked edition)"):
+                        link.label = f"Spotify · Listen (linked edition {index})"
+            return ids or edition_ids
         if ids:
             return ids
         # One official edition only, never arbitrary URLs or unbounded release fan-out.
@@ -130,6 +182,8 @@ class MusicBrainz:
             )
             if doc:
                 ids.update(linked_apple_ids(doc.data))
+                if media is not None:
+                    add_spotify_links(media, doc.data)
         return ids
 
     async def detail(self, kind, identifier):
@@ -143,7 +197,7 @@ class MusicBrainz:
         result = normalize(doc.data, kind, doc.fetched_at) if doc else None
         if result and kind == "album":
             try:
-                ids = await asyncio.wait_for(self.album_links(identifier, doc.data), 3)
+                ids = await asyncio.wait_for(self.album_links(identifier, doc.data, result), 3)
                 # Only a unique mapping is safe for general detail responses.
                 if len(ids) == 1:
                     result.external_ids["apple"] = ids.pop()
@@ -174,11 +228,28 @@ def normalize(data, kind, fetched_at):
             for x in data.get("artist-credit") or []
             if isinstance(x, dict)
         ],
+        credits=[
+            {
+                "name": credit.get("name") or (credit.get("artist") or {}).get("name"),
+                "role": "Artist",
+                "url": f"https://musicbrainz.org/artist/{credit['artist']['id']}"
+                if re.fullmatch(
+                    r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}",
+                    (credit.get("artist") or {}).get("id", ""),
+                )
+                else None,
+            }
+            for credit in data.get("artist-credit") or []
+            if isinstance(credit, dict) and (credit.get("name") or (credit.get("artist") or {}).get("name"))
+        ],
         genres=[x["name"] for x in data.get("genres") or data.get("tags") or []],
         ratings=rating("MusicBrainz users", votes.get("value"), 5, origin),
         rating_count=votes.get("votes-count"),
         facts={"Music format": data["primary-type"]} if data.get("primary-type") else {},
         format=data.get("primary-type"),
-        external_ids={"musicbrainz": identifier},
+        external_ids={
+            "musicbrainz": identifier,
+            **({"isrc": data["isrcs"][0].upper()} if len(data.get("isrcs", [])) == 1 else {}),
+        },
         source=origin,
     )

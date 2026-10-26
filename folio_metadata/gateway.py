@@ -8,12 +8,20 @@ from .adapters.apple import Apple
 from .adapters.catalog import TMDB, VNDB
 from .adapters.enrichment import OMDb, Steam
 from .adapters.igdb import IGDB
+from .adapters.jikan import Jikan
+from .adapters.mal import MyAnimeList
 from .adapters.mangaupdates import MangaUpdates
 from .adapters.musicbrainz import MusicBrainz
+from .adapters.openlibrary import OpenLibrary
+from .adapters.spotify import Spotify
 from .models import ProviderInfo
 from .transport import Disabled, NotConfigured, Transport
 
 DOCS = {
+    "spotify": "https://developer.spotify.com/documentation/web-api",
+    "mal": "https://myanimelist.net/apiconfig/references/api/v2",
+    "jikan": "https://docs.api.jikan.moe/",
+    "openlibrary": "https://openlibrary.org/dev/docs/api/search",
     "apple": "https://performance-partners.apple.com/search-api",
     "tmdb": "https://developer.themoviedb.org/docs/getting-started",
     "vndb": "https://api.vndb.org/kana",
@@ -25,6 +33,8 @@ DOCS = {
     "steam": "https://partner.steamgames.com/doc/webapi/IUserReviewsService",
 }
 REQUIRED = {
+    "spotify": ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"],
+    "mal": ["MAL_CLIENT_ID"],
     "tmdb": ["TMDB_READ_TOKEN"],
     "igdb": ["IGDB_CLIENT_ID", "IGDB_CLIENT_SECRET"],
     "omdb": ["OMDB_API_KEY"],
@@ -36,6 +46,10 @@ class Gateway:
     def __init__(self, client, settings):
         self.http = Transport(client, settings)
         self.adapters = {
+            "spotify": Spotify(self.http),
+            "mal": MyAnimeList(self.http),
+            "jikan": Jikan(self.http),
+            "openlibrary": OpenLibrary(self.http),
             "vndb": VNDB(self.http),
             "tmdb": TMDB(self.http),
             "anilist": AniList(self.http),
@@ -73,7 +87,13 @@ class Gateway:
         return [
             (name, k)
             for name, adapter in self.adapters.items()
-            if hasattr(adapter, "search") and (provider is None or provider == name)
+            if hasattr(adapter, "search")
+            and (provider is None or provider == name)
+            and not (
+                name == "jikan"
+                and provider is None
+                and (kind is None or self.http.settings.mal_client_id.get_secret_value())
+            )
             for k in adapter.kinds
             if kind is None or k == kind
         ]
@@ -85,6 +105,12 @@ class Gateway:
         )
 
     async def detail(self, provider, kind, identifier):
+        if provider in {"tmdb", "igdb"} and "-" in identifier:
+            from .collections import special_detail
+
+            return await asyncio.wait_for(
+                special_detail(self.http, provider, kind, identifier), self.http.settings.provider_timeout
+            )
         self.http.require(provider)
         return await asyncio.wait_for(
             self.adapters[provider].detail(kind, identifier), self.http.settings.provider_timeout
@@ -97,10 +123,17 @@ class Gateway:
         )
 
     def valid(self, provider, kind, identifier, enrichment=False):
+        if not enrichment and provider in {"tmdb", "igdb"} and "-" in identifier:
+            from .collections import valid
+
+            return valid(provider, kind, identifier)
         adapter = self.adapters[provider]
-        if kind not in adapter.kinds or not hasattr(adapter, "enrich" if enrichment else "detail"):
+        kinds = adapter.kinds if enrichment else getattr(adapter, "detail_kinds", adapter.kinds)
+        if kind not in kinds or not hasattr(adapter, "enrich" if enrichment else "detail"):
             return False
         patterns = {
+            "spotify": r"[a-zA-Z0-9]{22}",
+            "openlibrary": r"OL[1-9][0-9]{0,12}W",
             "vndb": r"v[1-9][0-9]{0,9}",
             "omdb": r"tt[0-9]{7,12}",
             "musicbrainz": r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}",
